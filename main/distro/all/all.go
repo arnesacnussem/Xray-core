@@ -62,7 +62,7 @@ import (
 	_ "github.com/xtls/xray-core/transport/internet/udp"
 	_ "github.com/xtls/xray-core/transport/internet/websocket"
 
-	// Transport headers
+	// DigestAuth headers
 	_ "github.com/xtls/xray-core/transport/internet/headers/http"
 	_ "github.com/xtls/xray-core/transport/internet/headers/noop"
 	_ "github.com/xtls/xray-core/transport/internet/headers/srtp"

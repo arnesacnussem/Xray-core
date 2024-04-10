@@ -52,8 +52,9 @@ type HTTPRemoteConfig struct {
 }
 
 type HTTPClientConfig struct {
-	Servers []*HTTPRemoteConfig `json:"servers"`
-	Headers map[string]string   `json:"headers"`
+	Servers    []*HTTPRemoteConfig `json:"servers"`
+	Headers    map[string]string   `json:"headers"`
+	DigestAuth bool                `json:"digestAuth"`
 }
 
 func (v *HTTPClientConfig) Build() (proto.Message, error) {
@@ -85,5 +86,6 @@ func (v *HTTPClientConfig) Build() (proto.Message, error) {
 			Value: value,
 		})
 	}
+	config.DigestAuth = v.DigestAuth
 	return config, nil
 }

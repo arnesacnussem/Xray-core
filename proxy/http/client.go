@@ -33,6 +33,8 @@ type Client struct {
 	serverPicker  protocol.ServerPicker
 	policyManager policy.Manager
 	header        []*Header
+	useDigestAuth bool
+	digestAuths   map[string]*DigestAuth
 }
 
 type h2Conn struct {
@@ -64,6 +66,9 @@ func NewClient(ctx context.Context, config *ClientConfig) (*Client, error) {
 		serverPicker:  protocol.NewRoundRobinServerPicker(serverList),
 		policyManager: v.GetFeature(policy.ManagerType()).(policy.Manager),
 		header:        config.Header,
+
+		useDigestAuth: config.DigestAuth,
+		digestAuths:   map[string]*DigestAuth{},
 	}, nil
 }
 
@@ -107,7 +112,20 @@ func (c *Client) Process(ctx context.Context, link *transport.Link, dialer inter
 		dest := server.Destination()
 		user = server.PickUser()
 
-		netConn, err := setUpHTTPTunnel(ctx, dest, targetAddr, user, dialer, header, firstPayload)
+		var auth *DigestAuth = nil
+		if c.useDigestAuth {
+			auth = c.digestAuths[server.Destination().String()]
+			if auth == nil {
+				account := user.Account.(*Account)
+				auth = &DigestAuth{
+					username: account.Username,
+					password: account.Password,
+				}
+				c.digestAuths[server.Destination().String()] = auth
+			}
+		}
+
+		netConn, err := setUpHTTPTunnel(ctx, dest, targetAddr, user, dialer, header, firstPayload, auth)
 		if netConn != nil {
 			if _, ok := netConn.(*http2Conn); !ok {
 				if _, err := netConn.Write(firstPayload); err != nil {
@@ -207,7 +225,7 @@ func fillRequestHeader(ctx context.Context, header []*Header) ([]*Header, error)
 }
 
 // setUpHTTPTunnel will create a socket tunnel via HTTP CONNECT method
-func setUpHTTPTunnel(ctx context.Context, dest net.Destination, target string, user *protocol.MemoryUser, dialer internet.Dialer, header []*Header, firstPayload []byte) (net.Conn, error) {
+func setUpHTTPTunnel(ctx context.Context, dest net.Destination, target string, user *protocol.MemoryUser, dialer internet.Dialer, header []*Header, firstPayload []byte, digestAuth *DigestAuth) (net.Conn, error) {
 	req := &http.Request{
 		Method: http.MethodConnect,
 		URL:    &url.URL{Host: target},
@@ -216,9 +234,14 @@ func setUpHTTPTunnel(ctx context.Context, dest net.Destination, target string, u
 	}
 
 	if user != nil && user.Account != nil {
-		account := user.Account.(*Account)
-		auth := account.GetUsername() + ":" + account.GetPassword()
-		req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(auth)))
+		if digestAuth == nil {
+			account := user.Account.(*Account)
+			auth := account.GetUsername() + ":" + account.GetPassword()
+			req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(auth)))
+		} else if digestAuth.HasSetup {
+			digestAuth.fillHeader(req)
+		}
+
 	}
 
 	for _, h := range header {
@@ -243,6 +266,14 @@ func setUpHTTPTunnel(ctx context.Context, dest net.Destination, target string, u
 
 		if resp.StatusCode != http.StatusOK {
 			rawConn.Close()
+			digestAuth.HasSetup = false
+			if digestAuth != nil && resp.StatusCode == http.StatusProxyAuthRequired {
+				err := digestAuth.setup(resp)
+				if err != nil {
+					return nil, newError("Failed to setup digest auth" + err.Error())
+				}
+				return nil, newError("Will retry with digest auth")
+			}
 			return nil, newError("Proxy responded with non 200 code: " + resp.Status)
 		}
 		return rawConn, nil
@@ -275,7 +306,7 @@ func setUpHTTPTunnel(ctx context.Context, dest net.Destination, target string, u
 
 		if resp.StatusCode != http.StatusOK {
 			rawConn.Close()
-			return nil, newError("Proxy responded with non 200 code: " + resp.Status)
+			return nil, newError("Proxy(H/2) responded with non 200 code: " + resp.Status)
 		}
 		return newHTTP2Conn(rawConn, pw, resp.Body), nil
 	}
